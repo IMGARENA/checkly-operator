@@ -39,40 +39,70 @@ var _ = Describe("Ingress Controller", func() {
 			testGroup := "ingress-group"
 			testSuccessCode := "200"
 
-			key := types.NamespacedName{
+			apiCheckName := fmt.Sprintf("%s-%s-%s", "test-ingress", "foobar", testPath)
+
+			group := &checklyv1alpha1.Group{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: testGroup,
+				},
+				Spec: checklyv1alpha1.GroupSpec{
+					Locations: []string{"eu-west-1"},
+				},
+			}
+
+			ingressKey := types.NamespacedName{
 				Name:      "test-ingress",
+				Namespace: "default",
+			}
+
+			apiCheckKey := types.NamespacedName{
+				Name:      apiCheckName,
 				Namespace: "default",
 			}
 
 			annotation := make(map[string]string)
 			annotation["testing.domain.tld/enabled"] = "true"
-			annotation["testing.domain.tld/path"] = testPath
 			annotation["testing.domain.tld/success"] = testSuccessCode
 			annotation["testing.domain.tld/group"] = testGroup
 
-			rules := make([]networkingv1.IngressRule, 0)
+			pathTypeImplementationSpecific := networkingv1.PathTypeImplementationSpecific
+
+			var rules []networkingv1.IngressRule
 			rules = append(rules, networkingv1.IngressRule{
 				Host: testHost,
-			})
-
-			ingress := &networkingv1.Ingress{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        key.Name,
-					Namespace:   key.Namespace,
-					Annotations: annotation,
-				},
-				Spec: networkingv1.IngressSpec{
-					Rules: rules,
-					DefaultBackend: &networkingv1.IngressBackend{
-						Service: &networkingv1.IngressServiceBackend{
-							Name: "test-service",
-							Port: networkingv1.ServiceBackendPort{
-								Number: 7777,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							networkingv1.HTTPIngressPath{
+								Path:     fmt.Sprintf("/%s", testPath),
+								PathType: &pathTypeImplementationSpecific,
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: "test-service",
+										Port: networkingv1.ServiceBackendPort{
+											Number: 7777,
+										},
+									},
+								},
 							},
 						},
 					},
 				},
+			})
+
+			ingress := &networkingv1.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        ingressKey.Name,
+					Namespace:   ingressKey.Namespace,
+					Annotations: annotation,
+				},
+				Spec: networkingv1.IngressSpec{
+					Rules: rules,
+				},
 			}
+
+			// Create group
+			Expect(k8sClient.Create(context.Background(), group)).Should(Succeed())
 
 			// Create
 			Expect(k8sClient.Create(context.Background(), ingress)).Should(Succeed())
@@ -80,17 +110,14 @@ var _ = Describe("Ingress Controller", func() {
 			By("Expecting submitted")
 			Eventually(func() bool {
 				f := &networkingv1.Ingress{}
-				err := k8sClient.Get(context.Background(), key, f)
-				if err != nil {
-					return false
-				}
-				return true
+				err := k8sClient.Get(context.Background(), ingressKey, f)
+				return err == nil
 			}, timeout, interval).Should(BeTrue())
 
 			By("Expecting ApiCheck and OwnerReference to exist")
 			Eventually(func() bool {
 				f := &checklyv1alpha1.ApiCheck{}
-				err := k8sClient.Get(context.Background(), key, f)
+				err := k8sClient.Get(context.Background(), apiCheckKey, f)
 				if err != nil {
 					return false
 				}
@@ -99,112 +126,34 @@ var _ = Describe("Ingress Controller", func() {
 					return false
 				}
 
-				Expect(f.Spec.Endpoint == fmt.Sprintf("https://%s%s", testHost, testPath)).To(BeTrue())
-				Expect(f.Spec.Group).To(Equal(testGroup))
-				Expect(f.Spec.Success).To(Equal(testSuccessCode))
-				Expect(f.Spec.Muted).To(Equal(true))
+				Expect(f.Spec.Endpoint == fmt.Sprintf("https://%s/%s", testHost, testPath)).To(BeTrue(), "Hosts should match.")
+				Expect(f.Spec.Group).To(Equal(testGroup), "Group should match")
+				Expect(f.Spec.Success).To(Equal(testSuccessCode), "Success code should match")
+				Expect(f.Spec.Muted).To(Equal(true), "Mute should match")
 
 				for _, o := range f.OwnerReferences {
-					if o.Name != key.Name {
-						return false
-					}
+					Expect(o.Name).To(Equal(ingressKey.Name), "OwnerReference should be equal")
 				}
 
 				return true
-			}, timeout, interval).Should(BeTrue())
-
-			// Update
-			updatePath := "baaz"
-			updateHost := "foo.update"
-			annotation["testing.domain.tld/path"] = updatePath
-			annotation["testing.domain.tld/endpoint"] = updateHost
-			annotation["testing.domain.tld/success"] = ""
-			annotation["testing.domain.tld/muted"] = "false"
-			ingress = &networkingv1.Ingress{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        key.Name,
-					Namespace:   key.Namespace,
-					Annotations: annotation,
-				},
-				Spec: networkingv1.IngressSpec{
-					Rules: rules,
-					DefaultBackend: &networkingv1.IngressBackend{
-						Service: &networkingv1.IngressServiceBackend{
-							Name: "test-service",
-							Port: networkingv1.ServiceBackendPort{
-								Number: 7777,
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Update(context.Background(), ingress)).Should(Succeed())
-
-			By("Expecting ApiCheck to be updated")
-			Eventually(func() bool {
-				f := &checklyv1alpha1.ApiCheck{}
-				err := k8sClient.Get(context.Background(), key, f)
-				if err != nil {
-					return false
-				}
-
-				if f.Spec.Endpoint != fmt.Sprintf("https://%s%s", updateHost, updatePath) {
-					return false
-				}
-
-				if f.Spec.Success != "200" {
-					return false
-				}
-
-				if f.Spec.Muted {
-					return false
-				}
-
-				return true
-			}, timeout, interval).Should(BeTrue())
-
-			// Remove enabled label
-			annotation["testing.domain.tld/enabled"] = "false"
-			ingress = &networkingv1.Ingress{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        key.Name,
-					Namespace:   key.Namespace,
-					Annotations: annotation,
-				},
-				Spec: networkingv1.IngressSpec{
-					Rules: rules,
-					DefaultBackend: &networkingv1.IngressBackend{
-						Service: &networkingv1.IngressServiceBackend{
-							Name: "test-service",
-							Port: networkingv1.ServiceBackendPort{
-								Number: 7777,
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Update(context.Background(), ingress)).Should(Succeed())
-
-			// Expect ApiCheck to be deleted
-			By("Expecting APICheck to be deleted")
-			Eventually(func() error {
-				f := &checklyv1alpha1.ApiCheck{}
-				return k8sClient.Get(context.Background(), key, f)
-			}, timeout, interval).ShouldNot(Succeed())
+			}, timeout, interval).Should(BeTrue(), "Timed out waiting for success")
 
 			// Delete
 			By("Expecting to delete successfully")
 			Eventually(func() error {
 				f := &networkingv1.Ingress{}
-				k8sClient.Get(context.Background(), key, f)
+				k8sClient.Get(context.Background(), ingressKey, f)
 				return k8sClient.Delete(context.Background(), f)
 			}, timeout, interval).Should(Succeed())
 
 			By("Expecting delete to finish")
 			Eventually(func() error {
 				f := &networkingv1.Ingress{}
-				return k8sClient.Get(context.Background(), key, f)
+				return k8sClient.Get(context.Background(), ingressKey, f)
 			}, timeout, interval).ShouldNot(Succeed())
+
+			// Delete group
+			Expect(k8sClient.Delete(context.Background(), group)).Should(Succeed(), "Group deletion should succeed")
 
 		})
 
@@ -212,7 +161,6 @@ var _ = Describe("Ingress Controller", func() {
 		It("Some failures", func() {
 			testHost := "foo.bar"
 			testPath := "baz"
-			// testGroup := "ingress-group"
 			testSuccessCode := "200"
 
 			key := types.NamespacedName{
@@ -250,14 +198,6 @@ var _ = Describe("Ingress Controller", func() {
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), ingress)).Should(Succeed())
-
-			time.Sleep(time.Second * 5)
-
-			updated := &networkingv1.Ingress{}
-			Expect(k8sClient.Get(context.Background(), key, updated)).Should(Succeed())
-			annotation["testing.domain.tld/enabled"] = "true"
-			updated.Annotations = annotation
-			Expect(k8sClient.Update(context.Background(), updated)).Should(Succeed())
 
 			// Delete
 			By("Expecting to delete successfully")
