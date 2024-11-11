@@ -95,6 +95,7 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         env:
           IMAGE: ${{ steps.docker_meta.outputs.tags }}
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db
         with:
           image-ref: ${{ env.IMAGE }}
           format: "table"
