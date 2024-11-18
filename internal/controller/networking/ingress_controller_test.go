@@ -138,6 +138,37 @@ var _ = Describe("Ingress Controller", func() {
 				return true
 			}, timeout, interval).Should(BeTrue(), "Timed out waiting for success")
 
+			// Set enabled false
+			By("Expecting enabled false to remove ApiCheck")
+			Eventually(func() error {
+				// Get existing ingress object
+				f := &networkingv1.Ingress{}
+				err := k8sClient.Get(context.Background(), ingressKey, f)
+				if err != nil {
+					return err
+				}
+
+				// Update annotations with `enabled` set to false
+				f.Annotations["testing.domain.tld/enabled"] = "false"
+				err = k8sClient.Update(context.Background(), f)
+				if err != nil {
+					return err
+				}
+
+				u := &networkingv1.Ingress{}
+				err = k8sClient.Get(context.Background(), ingressKey, u)
+				if err != nil {
+					return err
+				}
+
+				Expect(u.Annotations["testing.domain.tld/enabled"]).To(Equal("false"), "Enabled annotation should be false")
+
+				// Expect API Check to not exist anymore
+				Expect(k8sClient.Get(context.Background(), apiCheckKey, f)).ShouldNot(Succeed())
+
+				return nil
+			}, timeout, interval).Should(Succeed(), "Timeout waiting for update")
+
 			// Delete
 			By("Expecting to delete successfully")
 			Eventually(func() error {
