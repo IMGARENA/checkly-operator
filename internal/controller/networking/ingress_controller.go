@@ -77,14 +77,13 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	logger.Info("Gathering data for the check")
 	apiCheckResources, err := r.gatherApiCheckData(&ingress)
 	if err != nil {
-		logger.Info("unable to gather data for the apiCheck resource", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+		logger.Error(err, "unable to gather data for the apiCheck resource", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
 		return ctrl.Result{}, err
 	}
 
 	// Do we want to do anything with the ingress?
-	_, checklyAnnotationExists := ingress.Annotations[annotationEnabled]
-	if (!checklyAnnotationExists) || (ingress.Annotations[annotationEnabled] == "false") {
-		logger.Info("Checking to see if we need to delete any resources as we're not handling this ingress.", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+	if value, exists := ingress.Annotations[annotationEnabled]; !exists || value == "false" {
+		logger.Info("Checking to see if we need to delete any resources as we're not handling this ingress", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
 
 		r.deleteIngressApiChecks(ctx, req, apiCheckResources, ingress)
 
@@ -98,7 +97,7 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	if ingress.GetDeletionTimestamp() != nil {
 		if controllerutil.ContainsFinalizer(&ingress, checklyFinalizer) {
-			logger.Info("Finalizer present, need to delete ApiCheck first.", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			logger.Info("Finalizer present, need to delete ApiCheck first", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
 
 			r.deleteIngressApiChecks(ctx, req, apiCheckResources, ingress)
 
@@ -140,39 +139,33 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// Create new Api Checks
-	if len(newApiChecks) > 0 {
-		for _, apiCheck := range newApiChecks {
-			logger.Info("Creating ApiCheck", "ApiCheck Name:", apiCheck.Name, "ApiCheck spec:", apiCheck.Spec)
-			err = r.Create(ctx, apiCheck)
-			if err != nil {
-				logger.Error(err, "Failed to create ApiCheck", "APICheck name:", apiCheck.Name, "Namespace:", apiCheck.Namespace, "Ingress name:", ingress.Name, "Ingress namespace", ingress.Namespace)
-				return ctrl.Result{}, err
-			}
+	for _, apiCheck := range newApiChecks {
+		logger.Info("Creating ApiCheck", "ApiCheck Name", apiCheck.Name, "ApiCheck spec", apiCheck.Spec)
+		err = r.Create(ctx, apiCheck)
+		if err != nil {
+			logger.Error(err, "Failed to create ApiCheck", "APICheck name", apiCheck.Name, "Namespace", apiCheck.Namespace, "Ingress name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			return ctrl.Result{}, err
 		}
 	}
 
 	// Update API checks
-	if len(updateApiChecks) > 0 {
-		for _, apiCheck := range updateApiChecks {
-			logger.Info("Updating ApiCheck", "ApiCheck Name:", apiCheck.Name)
-			err = r.Update(ctx, apiCheck)
-			if err != nil {
-				logger.Error(err, "Failed to update APICheck resource", "APICheck name:", apiCheck.Name, "Namespace:", apiCheck.Namespace, "Ingress name:", ingress.Name, "Ingress namespace", ingress.Namespace)
-				return ctrl.Result{}, err
-			}
+	for _, apiCheck := range updateApiChecks {
+		logger.Info("Updating ApiCheck", "ApiCheck Name", apiCheck.Name)
+		err = r.Update(ctx, apiCheck)
+		if err != nil {
+			logger.Error(err, "Failed to update APICheck resource", "APICheck name", apiCheck.Name, "Namespace", apiCheck.Namespace, "Ingress name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			return ctrl.Result{}, err
 		}
 	}
 
 	// Delete old API checks
-	if len(deleteApiChecks) > 0 {
-		for _, apiCheck := range deleteApiChecks {
+	for _, apiCheck := range deleteApiChecks {
 
-			logger.Info("Delete ApiCheck", "ApiCheck Name:", apiCheck.Name)
-			err = r.Delete(ctx, apiCheck)
-			if err != nil {
-				logger.Error(err, "Failed to delete ApiCheck resource", "APICheck name:", apiCheck.Name, "Namespace:", apiCheck.Namespace, "Ingress name:", ingress.Name, "Ingress namespace", ingress.Namespace)
-				return ctrl.Result{}, err
-			}
+		logger.Info("Delete ApiCheck", "ApiCheck Name", apiCheck.Name)
+		err = r.Delete(ctx, apiCheck)
+		if err != nil {
+			logger.Error(err, "Failed to delete ApiCheck resource", "APICheck name", apiCheck.Name, "Namespace", apiCheck.Namespace, "Ingress name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -186,7 +179,12 @@ func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (apiChecks []*checklyv1alpha1.ApiCheck, err error) {
+func (r *IngressReconciler) gatherApiCheckData(
+	ingress *networkingv1.Ingress,
+) (
+	apiChecks []*checklyv1alpha1.ApiCheck,
+	err error,
+) {
 
 	annotationHost := r.ControllerDomain
 	annotationPath := fmt.Sprintf("%s/path", annotationHost)
@@ -196,19 +194,16 @@ func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (a
 	annotationMuted := fmt.Sprintf("%s/muted", annotationHost)
 
 	// Expected success code
-	var success string
-	if ingress.Annotations[annotationSuccess] != "" {
-		success = ingress.Annotations[annotationSuccess]
-	} else {
+	success := ingress.Annotations[annotationSuccess]
+	if success == "" {
 		success = "200"
 	}
 
 	// Group
-	var group string
-	if ingress.Annotations[annotationGroup] != "" {
-		group = ingress.Annotations[annotationGroup]
-	} else {
+	group := ingress.Annotations[annotationGroup]
+	if group == "" {
 		err = fmt.Errorf("could not find a value for the group annotation, can't continue without one")
+		return
 	}
 
 	// Muted
@@ -223,19 +218,12 @@ func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (a
 	labels["ingress-controller"] = ingress.Name
 
 	// Get the host(s) and path(s) from the ingress object
-	// No Rules specified, nothing to do
-	if len(ingress.Spec.Rules) == 0 {
-		return
-	}
-
 	for _, rule := range ingress.Spec.Rules {
 
 		// Get the host
-		var host string
-		if ingress.Annotations[annotationEndpoint] == "" {
+		host := ingress.Annotations[annotationEndpoint]
+		if host == "" {
 			host = rule.Host
-		} else {
-			host = ingress.Annotations[annotationEndpoint]
 		}
 
 		// Get the path(s)
@@ -300,7 +288,16 @@ func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (a
 	return
 }
 
-func (r *IngressReconciler) compareApiChecks(ctx context.Context, ingress *networkingv1.Ingress, ingressApiChecks []*checklyv1alpha1.ApiCheck) (newApiChecks []*checklyv1alpha1.ApiCheck, deleteApiChecks []*checklyv1alpha1.ApiCheck, updateApiChecks []*checklyv1alpha1.ApiCheck, err error) {
+func (r *IngressReconciler) compareApiChecks(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+	ingressApiChecks []*checklyv1alpha1.ApiCheck,
+) (
+	newApiChecks []*checklyv1alpha1.ApiCheck,
+	deleteApiChecks []*checklyv1alpha1.ApiCheck,
+	updateApiChecks []*checklyv1alpha1.ApiCheck,
+	err error,
+) {
 
 	logger := log.FromContext(ctx)
 
@@ -324,19 +321,20 @@ func (r *IngressReconciler) compareApiChecks(ctx context.Context, ingress *netwo
 
 	// Compare items
 	for _, existingApiCheck := range existingApiChecksMap {
-		_, exists := newApiChecksMap[existingApiCheck.Name]
+		newApiCheck, exists := newApiChecksMap[existingApiCheck.Name]
 		if exists {
-			if existingApiCheck.Spec == newApiChecksMap[existingApiCheck.Name].Spec {
+			if existingApiCheck.Spec == newApiCheck.Spec {
 				logger.Info("ApiCheck data is identical, no need for update", "ApiCheck Name", existingApiCheck.Name)
 			} else {
-				logger.Info("ApiCheck data is not identical, update needed", "ApiCheck Name", existingApiCheck.Name, "old spec", existingApiCheck.Spec, "new spec", newApiChecksMap[existingApiCheck.Name].Spec)
+				logger.Info(
+					"ApiCheck data is not identical, update needed", "ApiCheck Name", existingApiCheck.Name, "old spec", existingApiCheck.Spec, "new spec", newApiCheck.Spec)
 				updateApiChecks = append(updateApiChecks, newApiChecksMap[existingApiCheck.Name])
 			}
 
 			// Remove items from new api checks map
 			delete(newApiChecksMap, existingApiCheck.Name)
 		} else {
-			logger.Info("ApiCheck is not needed anymore, delete.", "ApiCheck Name", existingApiCheck.Name)
+			logger.Info("ApiCheck is not needed anymore, delete", "ApiCheck Name", existingApiCheck.Name)
 			deleteApiChecks = append(deleteApiChecks, &existingApiCheck)
 		}
 	}
@@ -349,7 +347,12 @@ func (r *IngressReconciler) compareApiChecks(ctx context.Context, ingress *netwo
 	return
 }
 
-func (r *IngressReconciler) deleteIngressApiChecks(ctx context.Context, req ctrl.Request, apiCheckResources []*checklyv1alpha1.ApiCheck, ingress networkingv1.Ingress) {
+func (r *IngressReconciler) deleteIngressApiChecks(
+	ctx context.Context,
+	req ctrl.Request,
+	apiCheckResources []*checklyv1alpha1.ApiCheck,
+	ingress networkingv1.Ingress,
+) {
 
 	logger := log.FromContext(ctx)
 
@@ -358,17 +361,17 @@ func (r *IngressReconciler) deleteIngressApiChecks(ctx context.Context, req ctrl
 		logger.Info("Checking if ApiCheck was created", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
 		err := r.Get(ctx, req.NamespacedName, apiCheckResource)
 		if err != nil {
-			logger.Info("ApiCheck resource is not present, we don't need to do anything.", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			logger.Info("ApiCheck resource is not present, we don't need to do anything", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
 			continue
 		}
 
-		logger.Info("ApiCheck resource is present, we need to delete it..", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+		logger.Info("ApiCheck resource is present, we need to delete it", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
 		err = r.Delete(ctx, apiCheckResource)
 		if err != nil {
-			logger.Error(err, "Failed to delete ApiCheck", "Name:", apiCheckResource.Name, "Namespace:", apiCheckResource.Namespace)
+			logger.Error(err, "Failed to delete ApiCheck", "Name", apiCheckResource.Name, "Namespace", apiCheckResource.Namespace)
 			continue
 		}
 
-		logger.Info("ApiCheck resource deleted successfully.", apiCheckResource.Name, "Namespace:", apiCheckResource.Namespace)
+		logger.Info("ApiCheck resource deleted successfully", apiCheckResource.Name, "Namespace", apiCheckResource.Namespace)
 	}
 }
