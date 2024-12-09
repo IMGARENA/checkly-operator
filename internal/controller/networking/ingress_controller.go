@@ -1,5 +1,5 @@
 /*
-Copyright 2022.
+Copyright 2024.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package networking
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	checklyv1alpha1 "github.com/checkly/checkly-operator/api/checkly/v1alpha1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -52,81 +54,119 @@ func (r *IngressReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	logger := log.FromContext(ctx)
 	logger.Info("Reconciler started")
 
-	ingress := &networkingv1.Ingress{}
-	apiCheck := &checklyv1alpha1.ApiCheck{}
-
+	// ////////////////////////////////
+	// Setup
+	// ///////////////////////////////
+	ingress := networkingv1.Ingress{}
+	// apiCheck := &checklyv1alpha1.ApiCheck{}
 	annotationEnabled := fmt.Sprintf("%s/enabled", r.ControllerDomain)
-
+	checklyFinalizer := fmt.Sprintf("%s/finalizer", r.ControllerDomain)
 	// Check if ingress object is still present
-	err := r.Get(ctx, req.NamespacedName, ingress)
+	err := r.Get(ctx, req.NamespacedName, &ingress)
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.Info("Ingress got deleted")
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		logger.Error(err, "Can't read the Ingress object")
 		return ctrl.Result{}, err
 	}
 	logger.Info("Ingress Object found")
 
-	// Check if annotation is present on the object
-	checklyAnnotation := ingress.Annotations[annotationEnabled] == "true"
-	if !checklyAnnotation {
-		// Annotation may have been removed or updated, we have to determine if we need to delete a previously created ApiCheck resource
-		logger.Info("annotation is not present, checking if ApiCheck was created")
-		err = r.Get(ctx, req.NamespacedName, apiCheck)
-		if err != nil {
-			logger.Info("Apicheck not present")
+	// Gather data for the checkly check
+	logger.Info("Gathering data for the check")
+	apiCheckResources, err := r.gatherApiCheckData(&ingress)
+	if err != nil {
+		logger.Error(err, "unable to gather data for the apiCheck resource", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+		return ctrl.Result{}, err
+	}
+
+	// Do we want to do anything with the ingress?
+	if value, exists := ingress.Annotations[annotationEnabled]; !exists || value == "false" {
+		logger.Info("Checking to see if we need to delete any resources as we're not handling this ingress", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+
+		r.deleteIngressApiChecks(ctx, req, apiCheckResources, ingress)
+
+		if ingress.GetDeletionTimestamp() == nil {
 			return ctrl.Result{}, nil
 		}
-		logger.Info("ApiCheck is present, but we need to delete it")
-		err = r.Delete(ctx, apiCheck)
-		if err != nil {
-			logger.Info("Failed to delete ApiCheck")
-			return ctrl.Result{}, err
-			// }
-		}
+	}
+	// ////////////////////////////////
+	// Delete Logic
+	// ///////////////////////////////
 
+	if ingress.GetDeletionTimestamp() != nil {
+		if controllerutil.ContainsFinalizer(&ingress, checklyFinalizer) {
+			logger.Info("Finalizer present, need to delete ApiCheck first", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+
+			r.deleteIngressApiChecks(ctx, req, apiCheckResources, ingress)
+
+			// Delete finalizer logic
+			logger.Info("Deleting finalizer", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			controllerutil.RemoveFinalizer(&ingress, checklyFinalizer)
+			err = r.Update(ctx, &ingress)
+			if err != nil {
+				logger.Error(err, "Failed to delete finalizer", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+				return ctrl.Result{}, err
+			}
+			logger.Info("Successfully deleted finalizer", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			return ctrl.Result{}, nil
+		}
+	}
+
+	// /////////////////////////////
+	// Finalizer logic
+	// ////////////////////////////
+	if !controllerutil.ContainsFinalizer(&ingress, checklyFinalizer) {
+		controllerutil.AddFinalizer(&ingress, checklyFinalizer)
+		err = r.Update(ctx, &ingress)
+		if err != nil {
+			logger.Error(err, "Failed to update ingress finalizer")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Added finalizer", "ingress", ingress.Name, "Ingress namespace", ingress.Namespace)
 		return ctrl.Result{}, nil
 	}
 
-	// Gather data for the checkly check
-	apiCheckSpec, err := r.gatherApiCheckData(ingress)
+	// /////////////////////////////
+	// Update/Create logic
+	// ////////////////////////////
+
+	newApiChecks, deleteApiChecks, updateApiChecks, err := r.compareApiChecks(ctx, &ingress, apiCheckResources)
 	if err != nil {
-		logger.Info("unable to gather data for the apiCheck resource")
+		logger.Error(err, "Failed to list existing API checks")
 		return ctrl.Result{}, err
 	}
 
-	// Check and see if the ApiCheck has been created before
-	err = r.Get(ctx, req.NamespacedName, apiCheck)
-	if err == nil {
-		logger.Info("apiCheck exists, doing an update")
-		// We can reference the exiting apiCheck object that the server returned
-		apiCheck.Spec = apiCheckSpec
+	// Create new Api Checks
+	for _, apiCheck := range newApiChecks {
+		logger.Info("Creating ApiCheck", "ApiCheck Name", apiCheck.Name, "ApiCheck spec", apiCheck.Spec)
+		err = r.Create(ctx, apiCheck)
+		if err != nil {
+			logger.Error(err, "Failed to create ApiCheck", "APICheck name", apiCheck.Name, "Namespace", apiCheck.Namespace, "Ingress name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Update API checks
+	for _, apiCheck := range updateApiChecks {
+		logger.Info("Updating ApiCheck", "ApiCheck Name", apiCheck.Name)
 		err = r.Update(ctx, apiCheck)
 		if err != nil {
+			logger.Error(err, "Failed to update APICheck resource", "APICheck name", apiCheck.Name, "Namespace", apiCheck.Namespace, "Ingress name", ingress.Name, "Ingress namespace", ingress.Namespace)
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
 	}
 
-	// Create apiCheck
-	// We need to write the k8s spec resources as it is a new object
-	newApiCheck := &checklyv1alpha1.ApiCheck{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ingress.Name,
-			Namespace: ingress.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(ingress, networkingv1.SchemeGroupVersion.WithKind("ingress")),
-			},
-		},
-		Spec: apiCheckSpec,
-	}
+	// Delete old API checks
+	for _, apiCheck := range deleteApiChecks {
 
-	err = r.Create(ctx, newApiCheck)
-	if err != nil {
-		logger.Info("Failed to create ApiCheck", "err", err)
-		return ctrl.Result{}, err
+		logger.Info("Delete ApiCheck", "ApiCheck Name", apiCheck.Name)
+		err = r.Delete(ctx, apiCheck)
+		if err != nil {
+			logger.Error(err, "Failed to delete ApiCheck resource", "APICheck name", apiCheck.Name, "Namespace", apiCheck.Namespace, "Ingress name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			return ctrl.Result{}, err
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -139,7 +179,12 @@ func (r *IngressReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (apiCheckSpec checklyv1alpha1.ApiCheckSpec, err error) {
+func (r *IngressReconciler) gatherApiCheckData(
+	ingress *networkingv1.Ingress,
+) (
+	apiChecks []*checklyv1alpha1.ApiCheck,
+	err error,
+) {
 
 	annotationHost := r.ControllerDomain
 	annotationPath := fmt.Sprintf("%s/path", annotationHost)
@@ -148,35 +193,17 @@ func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (a
 	annotationGroup := fmt.Sprintf("%s/group", annotationHost)
 	annotationMuted := fmt.Sprintf("%s/muted", annotationHost)
 
-	// Construct the endpoint
-	path := ""
-	if ingress.Annotations[annotationPath] != "" {
-		path = ingress.Annotations[annotationPath]
-	}
-
-	var host string
-	if ingress.Annotations[annotationEndpoint] == "" {
-		host = ingress.Spec.Rules[0].Host
-	} else {
-		host = ingress.Annotations[annotationEndpoint]
-	}
-
-	endpoint := fmt.Sprintf("https://%s%s", host, path)
-
 	// Expected success code
-	var success string
-	if ingress.Annotations[annotationSuccess] != "" {
-		success = ingress.Annotations[annotationSuccess]
-	} else {
+	success := ingress.Annotations[annotationSuccess]
+	if success == "" {
 		success = "200"
 	}
 
 	// Group
-	var group string
-	if ingress.Annotations[annotationGroup] != "" {
-		group = ingress.Annotations[annotationGroup]
-	} else {
+	group := ingress.Annotations[annotationGroup]
+	if group == "" {
 		err = fmt.Errorf("could not find a value for the group annotation, can't continue without one")
+		return
 	}
 
 	// Muted
@@ -187,13 +214,164 @@ func (r *IngressReconciler) gatherApiCheckData(ingress *networkingv1.Ingress) (a
 		muted = true
 	}
 
-	apiCheckSpec = checklyv1alpha1.ApiCheckSpec{
-		Endpoint: endpoint,
-		Group:    group,
-		Success:  success,
-		Muted:    muted,
+	labels := make(map[string]string)
+	labels["ingress-controller"] = ingress.Name
+
+	// Get the host(s) and path(s) from the ingress object
+	for _, rule := range ingress.Spec.Rules {
+
+		// Get the host
+		host := ingress.Annotations[annotationEndpoint]
+		if host == "" {
+			host = rule.Host
+		}
+
+		// Get the path(s)
+		var paths []string
+
+		if rule.HTTP == nil { // HTTP may not exist
+			paths = append(paths, "/")
+		} else if rule.HTTP.Paths == nil { // Paths may not exist
+			paths = append(paths, "/")
+		} else {
+			for _, rulePath := range rule.HTTP.Paths {
+				if ingress.Annotations[annotationPath] == "" {
+					if rulePath.Path == "" {
+						paths = append(paths, "/")
+					} else {
+						paths = append(paths, rulePath.Path)
+					}
+				} else {
+					paths = append(paths, ingress.Annotations[annotationPath])
+				}
+			}
+		}
+
+		for _, path := range paths {
+			// Replace path /
+			path = strings.TrimPrefix(path, "/")
+
+			// Set apiCheck Name
+			checkName := fmt.Sprintf("%s-%s-%s", ingress.Name, host, path)
+			checkName = strings.Replace(checkName, "/", "", -1)
+			checkName = strings.Replace(checkName, ".", "", -1)
+			checkName = strings.Trim(checkName, "-")
+
+			// Set endpoint
+			endpoint := fmt.Sprintf("https://%s/%s", host, path)
+
+			// Construct ApiCheck Spec
+			apiCheckSpec := &checklyv1alpha1.ApiCheckSpec{
+				Endpoint: endpoint,
+				Group:    group,
+				Success:  success,
+				Muted:    muted,
+			}
+
+			newApiCheck := &checklyv1alpha1.ApiCheck{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkName,
+					Namespace: ingress.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(ingress, networkingv1.SchemeGroupVersion.WithKind("ingress")),
+					},
+					Labels: labels,
+				},
+				Spec: *apiCheckSpec,
+			}
+
+			apiChecks = append(apiChecks, newApiCheck)
+		}
 	}
 
 	// Last return
 	return
+}
+
+func (r *IngressReconciler) compareApiChecks(
+	ctx context.Context,
+	ingress *networkingv1.Ingress,
+	ingressApiChecks []*checklyv1alpha1.ApiCheck,
+) (
+	newApiChecks []*checklyv1alpha1.ApiCheck,
+	deleteApiChecks []*checklyv1alpha1.ApiCheck,
+	updateApiChecks []*checklyv1alpha1.ApiCheck,
+	err error,
+) {
+
+	logger := log.FromContext(ctx)
+
+	var existingApiChecks checklyv1alpha1.ApiCheckList
+	labels := make(map[string]*string)
+	labels["ingress-controller"] = &ingress.Name
+	err = r.List(ctx, &existingApiChecks, client.InNamespace(ingress.Namespace), client.MatchingLabels{"ingress-controller": ingress.Name})
+	if err != nil {
+		return
+	}
+
+	existingApiChecksMap := make(map[string]checklyv1alpha1.ApiCheck)
+	for _, existingApiCheck := range existingApiChecks.Items {
+		existingApiChecksMap[existingApiCheck.Name] = existingApiCheck
+	}
+
+	newApiChecksMap := make(map[string]*checklyv1alpha1.ApiCheck)
+	for _, ingressApiCheck := range ingressApiChecks {
+		newApiChecksMap[ingressApiCheck.Name] = ingressApiCheck
+	}
+
+	// Compare items
+	for _, existingApiCheck := range existingApiChecksMap {
+		newApiCheck, exists := newApiChecksMap[existingApiCheck.Name]
+		if exists {
+			if existingApiCheck.Spec == newApiCheck.Spec {
+				logger.Info("ApiCheck data is identical, no need for update", "ApiCheck Name", existingApiCheck.Name)
+			} else {
+				logger.Info(
+					"ApiCheck data is not identical, update needed", "ApiCheck Name", existingApiCheck.Name, "old spec", existingApiCheck.Spec, "new spec", newApiCheck.Spec)
+				updateApiChecks = append(updateApiChecks, newApiChecksMap[existingApiCheck.Name])
+			}
+
+			// Remove items from new api checks map
+			delete(newApiChecksMap, existingApiCheck.Name)
+		} else {
+			logger.Info("ApiCheck is not needed anymore, delete", "ApiCheck Name", existingApiCheck.Name)
+			deleteApiChecks = append(deleteApiChecks, &existingApiCheck)
+		}
+	}
+
+	// Loop over remaining items and add them to the new checks list, these will be created
+	for _, newApiCheck := range newApiChecksMap {
+		newApiChecks = append(newApiChecks, newApiCheck)
+	}
+
+	return
+}
+
+func (r *IngressReconciler) deleteIngressApiChecks(
+	ctx context.Context,
+	req ctrl.Request,
+	apiCheckResources []*checklyv1alpha1.ApiCheck,
+	ingress networkingv1.Ingress,
+) {
+
+	logger := log.FromContext(ctx)
+
+	for _, apiCheckResource := range apiCheckResources {
+
+		logger.Info("Checking if ApiCheck was created", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+		err := r.Get(ctx, req.NamespacedName, apiCheckResource)
+		if err != nil {
+			logger.Info("ApiCheck resource is not present, we don't need to do anything", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+			continue
+		}
+
+		logger.Info("ApiCheck resource is present, we need to delete it", "Ingress Name", ingress.Name, "Ingress namespace", ingress.Namespace)
+		err = r.Delete(ctx, apiCheckResource)
+		if err != nil {
+			logger.Error(err, "Failed to delete ApiCheck", "Name", apiCheckResource.Name, "Namespace", apiCheckResource.Namespace)
+			continue
+		}
+
+		logger.Info("ApiCheck resource deleted successfully", apiCheckResource.Name, "Namespace", apiCheckResource.Namespace)
+	}
 }

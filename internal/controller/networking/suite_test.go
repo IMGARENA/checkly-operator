@@ -17,6 +17,8 @@ limitations under the License.
 package networking
 
 import (
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,14 +34,17 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/checkly/checkly-go-sdk"
 	checklyv1alpha1 "github.com/checkly/checkly-operator/api/checkly/v1alpha1"
+
 	//+kubebuilder:scaffold:imports
+	internalController "github.com/checkly/checkly-operator/internal/controller/checkly"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
 
-var cfg *rest.Config
+// var cfg *rest.Config
 var k8sClient client.Client
 var testEnv *envtest.Environment
 
@@ -62,7 +67,8 @@ var _ = BeforeSuite(func() {
 
 	var err error
 	// cfg is defined in this file globally.
-	cfg, err := testEnv.Start()
+	var cfg *rest.Config
+	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
@@ -88,6 +94,80 @@ var _ = BeforeSuite(func() {
 	err = (&IngressReconciler{
 		Client:           k8sManager.GetClient(),
 		Scheme:           k8sManager.GetScheme(),
+		ControllerDomain: testControllerDomain,
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	// Stub checkly client
+	testClient := checkly.NewClient(
+		"http://localhost:5557",
+		"foobarbaz",
+		nil,
+		nil,
+	)
+	testClient.SetAccountId("1234567890")
+	go func() {
+		http.HandleFunc("/v1/checks", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			w.Header().Set("Content-Type", "application/json")
+			resp := make(map[string]string)
+			resp["id"] = "2"
+			jsonResp, _ := json.Marshal(resp)
+			w.Write(jsonResp)
+		})
+		http.HandleFunc("/v1/checks/2", func(w http.ResponseWriter, r *http.Request) {
+			r.ParseForm()
+			method := r.Method
+			switch method {
+			case "PUT":
+				w.WriteHeader(http.StatusOK)
+				w.Header().Set("Content-Type", "application/json")
+				resp := make(map[string]string)
+				resp["id"] = "2"
+				jsonResp, _ := json.Marshal(resp)
+				w.Write(jsonResp)
+			case "DELETE":
+				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+		http.HandleFunc("/v1/check-groups", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusCreated)
+			w.Header().Set("Content-Type", "application/json")
+			resp := make(map[string]interface{})
+			resp["id"] = 1
+			jsonResp, _ := json.Marshal(resp)
+			w.Write(jsonResp)
+		})
+		http.HandleFunc("/v1/check-groups/1", func(w http.ResponseWriter, r *http.Request) {
+			r.ParseForm()
+			method := r.Method
+			switch method {
+			case "PUT":
+				w.WriteHeader(http.StatusOK)
+				w.Header().Set("Content-Type", "application/json")
+				resp := make(map[string]interface{})
+				resp["id"] = 1
+				jsonResp, _ := json.Marshal(resp)
+				w.Write(jsonResp)
+			case "DELETE":
+				w.WriteHeader(http.StatusNoContent)
+			}
+		})
+		http.ListenAndServe(":5557", nil)
+	}()
+
+	err = (&internalController.ApiCheckReconciler{
+		Client:           k8sManager.GetClient(),
+		Scheme:           k8sManager.GetScheme(),
+		ApiClient:        testClient,
+		ControllerDomain: testControllerDomain,
+	}).SetupWithManager(k8sManager)
+	Expect(err).ToNot(HaveOccurred())
+
+	err = (&internalController.GroupReconciler{
+		Client:           k8sManager.GetClient(),
+		Scheme:           k8sManager.GetScheme(),
+		ApiClient:        testClient,
 		ControllerDomain: testControllerDomain,
 	}).SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
