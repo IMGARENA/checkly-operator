@@ -134,7 +134,7 @@ func (r *ApiCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	if group.Status.ID == 0 {
-		logger.V(1).Info("Group ID has not been populated, we're too quick, requeining for retry", "group name", apiCheck.Spec.Group)
+		logger.V(1).Info("Group ID has not been populated, we're too quick, requeuing for retry", "group name", apiCheck.Spec.Group)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
@@ -145,11 +145,14 @@ func (r *ApiCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		Frequency:       apiCheck.Spec.Frequency,
 		MaxResponseTime: apiCheck.Spec.MaxResponseTime,
 		Endpoint:        apiCheck.Spec.Endpoint,
-		SuccessCode:     apiCheck.Spec.Success,
 		ID:              apiCheck.Status.ID,
 		GroupID:         group.Status.ID,
 		Muted:           apiCheck.Spec.Muted,
 		Labels:          apiCheck.Labels,
+		Assertions:      r.mapAssertions(apiCheck.Spec.Assertions),
+		Method:          apiCheck.Spec.Method,
+		Body:            apiCheck.Spec.Body,
+		BodyType:        apiCheck.Spec.BodyType,
 	}
 
 	// /////////////////////////////
@@ -161,7 +164,6 @@ func (r *ApiCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		// Existing object, we need to update it
 		logger.V(1).Info("Existing object, with ID", "checkly ID", apiCheck.Status.ID, "endpoint", apiCheck.Spec.Endpoint)
 		err := external.Update(internalCheck, r.ApiClient)
-		// err :=
 		if err != nil {
 			logger.Error(err, "Failed to update the checkly check")
 			return ctrl.Result{}, err
@@ -192,6 +194,20 @@ func (r *ApiCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	logger.V(1).Info("New checkly check created with", "checkly ID", apiCheck.Status.ID, "spec", apiCheck.Spec)
 
 	return ctrl.Result{}, nil
+}
+
+// mapAssertions maps ApiCheck assertions to external.Check assertions
+func (r *ApiCheckReconciler) mapAssertions(assertions []checklyv1alpha1.Assertion) []checkly.Assertion {
+	var mapped []checkly.Assertion
+	for _, assertion := range assertions {
+		mapped = append(mapped, checkly.Assertion{
+			Source:     assertion.Source,
+			Property:   assertion.Property,
+			Comparison: assertion.Comparison,
+			Target:     assertion.Target,
+		})
+	}
+	return mapped
 }
 
 // SetupWithManager sets up the controller with the Manager.

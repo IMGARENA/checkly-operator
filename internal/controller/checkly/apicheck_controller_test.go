@@ -52,7 +52,7 @@ var _ = Describe("ApiCheck Controller", func() {
 	// Avoid adding tests for vanilla CRUD operations because they would
 	// test Kubernetes API server, which isn't the goal here.
 	Context("ApiCheck", func() {
-		It("Full reconciliation", func() {
+		It("Full reconciliation with body and body type", func() {
 
 			key := types.NamespacedName{
 				Name:      "test-apicheck",
@@ -76,9 +76,23 @@ var _ = Describe("ApiCheck Controller", func() {
 				},
 				Spec: checklyv1alpha1.ApiCheckSpec{
 					Endpoint: "http://bar.baz/quoz",
-					Success:  "200",
 					Group:    groupKey.Name,
 					Muted:    true,
+					Method:   "POST",
+					Body:     `{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}`,
+					BodyType: "json",
+					Assertions: []checklyv1alpha1.Assertion{
+						{
+							Source:     "STATUS_CODE",
+							Comparison: "EQUALS",
+							Target:     "200",
+						},
+						{
+							Source:     "JSON_BODY",
+							Property:   "$.status",
+							Comparison: "NOT_NULL",
+						},
+					},
 				},
 			}
 
@@ -97,7 +111,7 @@ var _ = Describe("ApiCheck Controller", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			// Status.ID should be present
-			By("Expecting group ID")
+			By("Expecting group ID, method, body, body type, and assertions")
 			Eventually(func() bool {
 				f := &checklyv1alpha1.ApiCheck{}
 				err := k8sClient.Get(context.Background(), key, f)
@@ -106,6 +120,22 @@ var _ = Describe("ApiCheck Controller", func() {
 				}
 
 				if f.Spec.Muted != true {
+					return false
+				}
+
+				if f.Spec.Method != "POST" {
+					return false
+				}
+
+				if f.Spec.Body != `{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}` {
+					return false
+				}
+
+				if f.Spec.BodyType != "json" {
+					return false
+				}
+
+				if len(f.Spec.Assertions) != 2 {
 					return false
 				}
 

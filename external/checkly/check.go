@@ -18,8 +18,10 @@ package external
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/checkly/checkly-go-sdk"
@@ -32,23 +34,20 @@ type Check struct {
 	Frequency       int
 	MaxResponseTime int
 	Endpoint        string
-	SuccessCode     string
 	GroupID         int64
 	ID              string
 	Muted           bool
 	Labels          map[string]string
+	Assertions      []checkly.Assertion
+	Method          string
+	Body            string
+	BodyType        string
 }
 
 func checklyCheck(apiCheck Check) (check checkly.Check, err error) {
 
-	shouldFail, err := shouldFail(apiCheck.SuccessCode)
-	if err != nil {
-		return
-	}
-
 	tags := getTags(apiCheck.Labels)
-	tags = append(tags, "checkly-operator")
-	tags = append(tags, apiCheck.Namespace)
+	tags = append(tags, "checkly-operator", apiCheck.Namespace)
 
 	alertSettings := checkly.AlertSettings{
 		EscalationType: checkly.RunBased,
@@ -67,49 +66,76 @@ func checklyCheck(apiCheck Check) (check checkly.Check, err error) {
 		},
 	}
 
+	shouldFail := false
+	assertions := apiCheck.Assertions
+	if len(assertions) == 0 {
+		assertions = []checkly.Assertion{
+			{
+				Source:     checkly.StatusCode,
+				Comparison: checkly.Equals,
+				Target:     "200",
+			},
+		}
+	} else {
+		for _, assertion := range assertions {
+			if assertion.Source == checkly.StatusCode && assertion.Comparison == checkly.Equals && assertion.Target >= "400" {
+				shouldFail = true
+				break
+			}
+		}
+	}
+
+	method := http.MethodGet
+	if apiCheck.Method != "" {
+		method = apiCheck.Method
+	}
+
+	body := apiCheck.Body
+	bodyType := strings.ToUpper(apiCheck.BodyType)
+	if bodyType == "" {
+		bodyType = "NONE"
+	}
+
+	if bodyType == "JSON" {
+		var jsonBody map[string]interface{}
+		err := json.Unmarshal([]byte(body), &jsonBody)
+		if err != nil {
+			return check, fmt.Errorf("invalid JSON body: %w", err)
+		}
+
+		formattedBody, err := json.Marshal(jsonBody)
+		if err != nil {
+			return check, fmt.Errorf("failed to format JSON body: %w", err)
+		}
+
+		body = string(formattedBody)
+	}
+
 	check = checkly.Check{
-		Name:                   apiCheck.Name,
-		Type:                   checkly.TypeAPI,
-		Frequency:              checkValueInt(apiCheck.Frequency, 5),
-		DegradedResponseTime:   5000,
-		MaxResponseTime:        checkValueInt(apiCheck.MaxResponseTime, 15000),
-		Activated:              true,
-		Muted:                  apiCheck.Muted, // muted for development
-		ShouldFail:             shouldFail,
-		DoubleCheck:            false,
-		SSLCheck:               false,
-		LocalSetupScript:       "",
-		LocalTearDownScript:    "",
-		Locations:              []string{},
-		Tags:                   tags,
-		AlertSettings:          alertSettings,
+		Name:                 apiCheck.Name,
+		Type:                 checkly.TypeAPI,
+		Frequency:            checkValueInt(apiCheck.Frequency, 5),
+		DegradedResponseTime: 5000,
+		MaxResponseTime:      checkValueInt(apiCheck.MaxResponseTime, 15000),
+		Activated:            true,
+		Muted:                apiCheck.Muted,
+		ShouldFail:           shouldFail,
+		DoubleCheck:          false,
+		SSLCheck:             false,
+		AlertSettings:        alertSettings,
+		Locations:            []string{},
+		Tags:                 tags,
+		Request: checkly.Request{
+			Method:          method,
+			URL:             apiCheck.Endpoint,
+			Assertions:      assertions,
+			Headers:         []checkly.KeyValue{},
+			QueryParameters: []checkly.KeyValue{},
+			Body:            body,
+			BodyType:        bodyType,
+		},
 		UseGlobalAlertSettings: false,
 		GroupID:                apiCheck.GroupID,
-		Request: checkly.Request{
-			Method:  http.MethodGet,
-			URL:     apiCheck.Endpoint,
-			Headers: []checkly.KeyValue{
-				// {
-				// 	Key:   "X-Test",
-				// 	Value: "foo",
-				// },
-			},
-			QueryParameters: []checkly.KeyValue{
-				// {
-				// 	Key:   "query",
-				// 	Value: "foo",
-				// },
-			},
-			Assertions: []checkly.Assertion{
-				{
-					Source:     checkly.StatusCode,
-					Comparison: checkly.Equals,
-					Target:     apiCheck.SuccessCode,
-				},
-			},
-			Body:     "",
-			BodyType: "NONE",
-		},
 	}
 
 	return
@@ -161,16 +187,4 @@ func Delete(ID string, client checkly.Client) (err error) {
 	err = client.Delete(ctx, ID)
 
 	return
-}
-
-func shouldFail(successCode string) (bool, error) {
-	code, err := strconv.Atoi(successCode)
-	if err != nil {
-		return false, err
-	}
-	if code < 400 {
-		return false, nil
-	} else {
-		return true, nil
-	}
 }

@@ -57,6 +57,39 @@ spec:
           spec:
             description: ApiCheckSpec defines the desired state of ApiCheck
             properties:
+              assertions:
+                description: Assertions define the validation conditions for the check
+                items:
+                  description: |-
+                    EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
+                    NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+                  properties:
+                    comparison:
+                      description: Comparison operation (e.g., EQUALS, NOT_NULL, etc.)
+                      type: string
+                    property:
+                      description: Property to validate, e.g., a JSONPath expression
+                        like $.result (optional)
+                      type: string
+                    source:
+                      description: Source of the assertion (e.g., STATUS_CODE, JSON_BODY,
+                        etc.)
+                      type: string
+                    target:
+                      description: Target value for the comparison (optional)
+                      type: string
+                  required:
+                  - comparison
+                  - source
+                  type: object
+                type: array
+              body:
+                description: Body defines the request payload for the check
+                type: string
+              bodyType:
+                description: BodyType specifies the format of the request payload,
+                  e.g., json, graphql, raw data (default is NONE)
+                type: string
               endpoint:
                 description: Endpoint determines which URL to monitor, ex. https://foo.bar/baz
                 type: string
@@ -72,6 +105,10 @@ spec:
                 description: MaxResponseTime determines what the maximum number of
                   miliseconds can pass before the check fails, default 15000
                 type: integer
+              method:
+                description: Method defines the HTTP method to use for the check,
+                  e.g., GET, POST, PUT (default is GET)
+                type: string
               muted:
                 description: Muted determines if the created alert is muted or not,
                   default false
@@ -82,7 +119,6 @@ spec:
             required:
             - endpoint
             - group
-            - success
             type: object
           status:
             description: ApiCheckStatus defines the observed state of ApiCheck

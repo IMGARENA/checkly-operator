@@ -22,6 +22,19 @@ import (
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+type Assertion struct {
+	// Source of the assertion (e.g., STATUS_CODE, JSON_BODY, etc.)
+	Source string `json:"source"`
+
+	// Property to validate, e.g., a JSONPath expression like $.result (optional)
+	Property string `json:"property,omitempty"`
+
+	// Comparison operation (e.g., EQUALS, NOT_NULL, etc.)
+	Comparison string `json:"comparison"`
+
+	// Target value for the comparison (optional)
+	Target string `json:"target,omitempty"`
+}
 
 // ApiCheckSpec defines the desired state of ApiCheck
 type ApiCheckSpec struct {
@@ -38,13 +51,25 @@ type ApiCheckSpec struct {
 	Endpoint string `json:"endpoint"`
 
 	// Success determines the returned success code, ex. 200
-	Success string `json:"success"`
+	Success string `json:"success,omitempty"`
 
 	// MaxResponseTime determines what the maximum number of miliseconds can pass before the check fails, default 15000
 	MaxResponseTime int `json:"maxresponsetime,omitempty"`
 
+	// Method defines the HTTP method to use for the check, e.g., GET, POST, PUT (default is GET)
+	Method string `json:"method,omitempty"`
+
 	// Group determines in which group does the check belong to
 	Group string `json:"group"`
+
+	// Body defines the request payload for the check
+	Body string `json:"body,omitempty"`
+
+	// BodyType specifies the format of the request payload, e.g., json, graphql, raw data (default is NONE)
+	BodyType string `json:"bodyType,omitempty"`
+
+	// Assertions define the validation conditions for the check
+	Assertions []Assertion `json:"assertions,omitempty"`
 }
 
 // ApiCheckStatus defines the observed state of ApiCheck
